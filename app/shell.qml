@@ -1,4 +1,4 @@
-//@ pragma AppId plugstage
+//@ pragma AppId plugboard
 //@ pragma UseQApplication
 import QtQuick
 import QtQuick.Controls
@@ -6,14 +6,14 @@ import Quickshell
 import Quickshell.Io
 import "components"
 
-// Plugstage: queue Omarchy plugin changes (bar placement, on/off, uninstall)
+// Plugboard: queue Omarchy plugin changes (bar placement, on/off, uninstall)
 // and apply them in one go. Runs as its own process, so the bar rebuild each
 // change triggers can't close it.
 ShellRoot {
   id: shell
 
   IpcHandler {
-    target: "plugstage"
+    target: "plugboard"
     function show(): void { win.visible = true }
     function quit(): void { Qt.quit() }
     function state(): string {
@@ -37,7 +37,7 @@ ShellRoot {
 
   FloatingWindow {
     id: win
-    title: "Plugstage — Omarchy plugins"
+    title: "Plugboard — Omarchy plugins" + (Quickshell.env("PLUGBOARD_DEMO") === "1" ? " (demo)" : "")
     implicitWidth: 1000
     implicitHeight: 760
     visible: true
@@ -49,6 +49,12 @@ ShellRoot {
       focus: true
 
       readonly property string tools: Quickshell.shellDir + "/../tools"
+      // `plugboard --demo`: made-up plugins from demo/fixture.json; nothing is changed.
+      readonly property bool demo: Quickshell.env("PLUGBOARD_DEMO") === "1"
+      function backend(script, args) {
+        return demo ? ["python3", "-I", tools + "/demo.py", { "state.py": "state", "removal-check.py": "check", "apply.py": "apply" }[script]].concat(args)
+                    : ["python3", "-I", tools + "/" + script].concat(args)
+      }
 
       property var plugins: []
       property string loadError: ""
@@ -178,7 +184,7 @@ ShellRoot {
           checking = true
           removalInfo = {}
           confirmOpen = true
-          checkProc.command = ["python3", "-I", tools + "/removal-check.py"].concat(removes)
+          checkProc.command = backend("removal-check.py", removes)
           checkProc.running = true
         } else run(list)
       }
@@ -187,7 +193,7 @@ ShellRoot {
         progress = list.map(function (o) { return { id: o.id, op: o.op, section: o.section || "", status: "queued", msg: "" } })
         progressSummary = ""
         progressOpen = true
-        applyProc.command = ["python3", "-I", tools + "/apply.py", JSON.stringify(list)]
+        applyProc.command = backend("apply.py", [JSON.stringify(list)])
         applyProc.running = true
       }
       function onEvent(ev) {
@@ -240,7 +246,7 @@ ShellRoot {
 
       Process {
         id: stateProc
-        command: ["python3", "-I", root.tools + "/state.py"]
+        command: root.backend("state.py", [])
         stdout: StdioCollector {
           onStreamFinished: {
             root.loading = false
@@ -649,7 +655,7 @@ ShellRoot {
                 width: progCol.width
                 Txt {
                   width: parent.width
-                  text: ({ queued: "○", running: "◌", ok: "✓", error: "✗" }[modelData.status] || "·") + "  " + root.describe(modelData)
+                  text: ({ queued: "○", running: "▸", ok: "✓", error: "✗" }[modelData.status] || "·") + "  " + root.describe(modelData)
                   color: modelData.status === "error" ? Theme.red : modelData.status === "ok" ? Theme.green
                        : modelData.status === "running" ? Theme.accent : Theme.faint
                 }
@@ -663,7 +669,7 @@ ShellRoot {
             }
             Txt {
               visible: !root.busy
-              text: "Log: ~/.local/state/plugstage/apply.log"
+              text: "Log: ~/.local/state/plugboard/apply.log"
               color: Theme.faint; font.pixelSize: Theme.fsSmall
             }
             Btn {

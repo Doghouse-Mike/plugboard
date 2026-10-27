@@ -1,0 +1,19 @@
+#!/bin/bash
+# Plugboard launcher: one instance; a second launch raises the existing window.
+#   plugboard [--demo]
+# --demo shows made-up plugins (demo/fixture.json) and changes nothing.
+set -euo pipefail
+APP="$(readlink -f "$(dirname "$(readlink -f "$0")")/../app")"
+
+case "${1:-}" in
+  --demo) export PLUGBOARD_DEMO=1 ;;
+  -h|--help) sed -n '2,4p' "$0"; exit 0 ;;
+  "") ;;
+  *) echo "plugboard: unknown option $1" >&2; exit 2 ;;
+esac
+
+if qs ipc -p "$APP" call plugboard show >/dev/null 2>&1; then
+  [ "${PLUGBOARD_DEMO:-}" = 1 ] && echo "plugboard: already running; close it (Ctrl+Q) first, then run --demo" >&2 && exit 1
+  exit 0
+fi
+exec qs -p "$APP" -n -d

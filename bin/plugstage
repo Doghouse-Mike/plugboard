@@ -1,9 +1,0 @@
-#!/bin/bash
-# Plugstage launcher: one instance; a second launch raises the existing window.
-set -euo pipefail
-APP="$(readlink -f "$(dirname "$(readlink -f "$0")")/../app")"
-
-if qs ipc -p "$APP" call plugstage show >/dev/null 2>&1; then
-  exit 0
-fi
-exec qs -p "$APP" -n -d

@@ -6,7 +6,7 @@
 ops: enable, disable, put (onto a bar section), move (to a bar section),
 remove (uninstall). Each change makes the shell rebuild the bar, so before
 every step this waits for the shell to answer again. Prints one JSON line
-per event for the UI and appends the same to ~/.local/state/plugstage/apply.log.
+per event for the UI and appends the same to ~/.local/state/plugboard/apply.log.
 """
 import json
 import os
@@ -16,7 +16,7 @@ import time
 
 SHELL_JSON = os.path.expanduser("~/.config/omarchy/shell.json")
 PLUGINS_DIR = os.path.expanduser("~/.config/omarchy/plugins")
-LOG = os.path.expanduser("~/.local/state/plugstage/apply.log")
+LOG = os.path.expanduser("~/.local/state/plugboard/apply.log")
 ORDER = {"disable": 0, "move": 1, "put": 2, "enable": 2, "remove": 3}
 BUSY = ("not responding", "not running", "not ready")
 
@@ -33,7 +33,8 @@ def emit(**event):
 
 
 def run(cmd):
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    env = {**os.environ, "OMARCHY_SHELL_IPC_TIMEOUT": "20s"}
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=90, env=env)
     return p.returncode, (p.stdout + p.stderr).strip()
 
 
@@ -61,6 +62,13 @@ def entry_id(entry):
     return entry if isinstance(entry, str) else str((entry or {}).get("id") or "")
 
 
+def json_arg(value):
+    # `qs ipc` unpacks an argument that looks like a JSON array into separate
+    # arguments; a leading space keeps it one string, and JSON.parse ignores it.
+    # (`omarchy bar set` re-encodes with jq, dropping the space, hence the direct call.)
+    return " " + json.dumps(value, separators=(",", ":"))
+
+
 def drop_from_hosts(pid):
     """Take a widget out of any host (the tray drawer) that nests it, keeping the host's order list in step."""
     with open(SHELL_JSON) as f:
@@ -75,13 +83,13 @@ def drop_from_hosts(pid):
             if len(kept) == len(widgets):
                 continue
             host = entry_id(entry)
-            rc, out = shell_cmd(["omarchy", "bar", "set", host, "widgets", json.dumps(kept), "--json"])
-            if rc != 0:
+            rc, out = shell_cmd(["omarchy-shell", "shell", "setBarWidget", host, "widgets", json_arg(kept), "{}"])
+            if rc != 0 or out != "ok":
                 return rc, out
             if isinstance(entry.get("order"), list) and pid in entry["order"]:
                 order = [o for o in entry["order"] if o != pid]
-                rc, out = shell_cmd(["omarchy", "bar", "set", host, "order", json.dumps(order), "--json"])
-                if rc != 0:
+                rc, out = shell_cmd(["omarchy-shell", "shell", "setBarWidget", host, "order", json_arg(order), "{}"])
+                if rc != 0 or out != "ok":
                     return rc, out
             emit(id=pid, status="info", msg=f"taken out of {host}")
     return 0, ""
