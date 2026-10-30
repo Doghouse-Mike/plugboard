@@ -1,7 +1,8 @@
 # Plugboard
 
 A plugin and theme manager for the [Omarchy](https://omarchy.org) shell that
-lets you **queue up changes and apply them together**, in its own window.
+lets you **queue up changes and apply them together**, in its own window,
+and keeps a way back from uninstalls.
 
 Plugin managers that live in the bar close every time a change rebuilds the
 bar, so working through a dozen changes means reopening the panel a dozen
@@ -72,6 +73,22 @@ the same Apply as plugins, switch first.
   which stay. Uninstalling a clone that's in use brings Omarchy's original
   widget back.
 
+## Backups
+
+The **Backups** tab lists what uninstalls left behind: the theme backups
+Plugboard makes (`~/.local/share/plugboard/theme-backups/`) and the
+`.<id>.bak.<date>` folders `omarchy plugin remove` leaves in
+`~/.config/omarchy/plugins/` for plugins that aren't git checkouts (a git
+plugin is deleted outright, and its repo is the way back). Each shows when it
+was removed and its size.
+
+![Backups](docs/backups.png)
+
+- **Restore** puts it back where it was and drops the backup. A restored
+  plugin comes back off the bar; place it from the Plugins tab. Restoring is
+  refused while something of the same name is installed again.
+- **Delete** removes the backup for good, after a confirmation.
+
 ## Careful around
 
 - **Tray-drawer widgets** (e.g. from
@@ -101,7 +118,7 @@ cp ~/.local/share/plugboard/plugboard.desktop ~/.local/share/applications/   # o
 
 ```bash
 plugboard          # open, or raise the running window
-plugboard --demo   # made-up plugins and themes; changes nothing
+plugboard --demo   # made-up plugins, themes and backups; changes nothing
 ```
 
 `Ctrl+F` searches, `Esc` closes dialogs, `Ctrl+Q` quits. Every apply is
@@ -110,11 +127,13 @@ logged to `~/.local/state/plugboard/apply.log`.
 ## How it's put together
 
 - `app/` — the Quickshell UI. IPC target `plugboard`: `show`, `state`,
-  `tab <plugins|themes>`, `queue <id> <off|on|left|center|right|remove>`
-  (`queue theme:<name> <use|remove>` for themes), `apply`, `confirm`,
+  `tab <plugins|themes|backups>`, `queue <id> <off|on|left|center|right|remove>`
+  (`queue theme:<name> <use|remove>` for themes, `queue backup:<kind>:<file>
+  <restore|delete>` for backups), `apply`, `confirm`,
   `discard`, `snapshot <png>` (handy for scripting and tests).
 - `tools/state.py` — read-only snapshot: `omarchy plugin list --json`, plus
   placement from `~/.config/omarchy/shell.json` and each plugin's git state.
+- `tools/backups.py` — read-only list of the backups uninstalls left.
 - `tools/themes.py` — read-only snapshot of the themes, the one in use and
   each one's source and preview.
 - `tools/removal-check.py` — what an uninstall would lose.

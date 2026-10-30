@@ -7,7 +7,8 @@ import Quickshell.Io
 import "components"
 
 // Plugboard: queue Omarchy plugin changes (bar placement, on/off, uninstall)
-// and theme changes (switch, uninstall), and apply them in one go. Runs as its own process, so the bar rebuild each
+// theme changes (switch, uninstall) and what to do with the backups those
+// uninstalls left (restore, delete for good), and apply them in one go. Runs as its own process, so the bar rebuild each
 // change triggers can't close it.
 ShellRoot {
   id: shell
@@ -17,7 +18,7 @@ ShellRoot {
     function show(): void { win.visible = true }
     function quit(): void { Qt.quit() }
     function state(): string {
-      return JSON.stringify({ plugins: root.plugins.length, themes: root.themes.length, currentTheme: root.themeCurrent,
+      return JSON.stringify({ plugins: root.plugins.length, themes: root.themes.length, backups: root.backups.length, currentTheme: root.themeCurrent,
                               pending: root.pendingCount, busy: root.busy, loading: root.loading, tab: root.tab, filter: root.filter })
     }
     function filterBy(name: string): void { root.filter = name }
@@ -25,6 +26,12 @@ ShellRoot {
     function search(text: string): void { searchInput.text = text }
     // Test hooks: queue/apply without real input, and render the window to a PNG.
     function queue(id: string, target: string): string {
+      if (id.indexOf("backup:") === 0) {
+        var b = root.backupById(id)
+        if (!b) return "unknown"
+        root.setBackupAction(b, target)
+        return JSON.stringify(root.ops())
+      }
       if (id.indexOf("theme:") === 0) {
         var t = root.themeByName(id.slice(6))
         if (!t) return "unknown"
@@ -60,7 +67,7 @@ ShellRoot {
 
   FloatingWindow {
     id: win
-    title: "Plugboard — Omarchy plugins & themes" + (Quickshell.env("PLUGBOARD_DEMO") === "1" ? " (demo)" : "")
+    title: "Plugboard — Omarchy plugins, themes & backups" + (Quickshell.env("PLUGBOARD_DEMO") === "1" ? " (demo)" : "")
     implicitWidth: 1000
     implicitHeight: 760
     visible: true
@@ -75,13 +82,14 @@ ShellRoot {
       // `plugboard --demo`: made-up plugins from demo/fixture.json; nothing is changed.
       readonly property bool demo: Quickshell.env("PLUGBOARD_DEMO") === "1"
       function backend(script, args) {
-        return demo ? ["python3", "-I", tools + "/demo.py", { "state.py": "state", "themes.py": "themes", "removal-check.py": "check", "apply.py": "apply" }[script]].concat(args)
+        return demo ? ["python3", "-I", tools + "/demo.py", { "state.py": "state", "themes.py": "themes", "backups.py": "backups", "removal-check.py": "check", "apply.py": "apply" }[script]].concat(args)
                     : ["python3", "-I", tools + "/" + script].concat(args)
       }
 
       property var plugins: []
       property string loadError: ""
-      property bool loading: stateProc.running || themesProc.running
+      property bool loading: stateProc.running || themesProc.running || backupsProc.running
+      property var backups: []
 
       property var themes: []
       property string themeCurrent: ""
@@ -129,6 +137,42 @@ ShellRoot {
       function refresh() {
         if (!stateProc.running) stateProc.running = true
         if (!themesProc.running) themesProc.running = true
+        if (!backupsProc.running) backupsProc.running = true
+      }
+
+      // ---- backups: "backup:<kind>:<file>" -> { action: "restore" | "delete" }
+      function backupById(id) {
+        for (var i = 0; i < backups.length; i++) if (backups[i].id === id) return backups[i]
+        return null
+      }
+      function backupAction(b) { rev; var q = pending[b.id]; return q ? q.action : "" }
+      function setBackupAction(b, action) {
+        if (locked) return
+        if (action === "restore" && b.installed) return
+        store(b.id, backupAction(b) === action ? {} : { action: action })
+      }
+      function fmtSize(n) {
+        if (n >= 1e9) return (n / 1e9).toFixed(1) + " GB"
+        if (n >= 1e6) return (n / 1e6).toFixed(1) + " MB"
+        if (n >= 1e3) return Math.round(n / 1e3) + " KB"
+        return n + " B"
+      }
+      readonly property real backupsSize: { var t = 0; for (var i = 0; i < backups.length; i++) t += backups[i].size; return t }
+      readonly property var visibleBackups: {
+        rev
+        var q = searchInput.text.toLowerCase().trim()
+        return backups.filter(function (b) {
+          if (root.filter === "themes" && b.kind !== "theme") return false
+          if (root.filter === "plugins" && b.kind !== "plugin") return false
+          if (root.filter === "pending" && !root.pending[b.id]) return false
+          return !q || (b.title + " " + b.name + " " + b.date).toLowerCase().indexOf(q) !== -1
+        })
+      }
+      function backupCountFor(f) {
+        rev
+        return backups.filter(function (b) {
+          return f === "all" || (f === "themes" && b.kind === "theme") || (f === "plugins" && b.kind === "plugin") || (f === "pending" && pending[b.id])
+        }).length
       }
 
       function current(p) {
@@ -287,6 +331,11 @@ ShellRoot {
         var out = []
         for (var id in pending) {
           var q = pending[id]
+          if (id.indexOf("backup:") === 0) {
+            var bk = backupById(id)
+            if (bk) out.push({ id: id, op: "backup-" + q.action, kind: bk.kind, file: bk.file, title: bk.title, date: bk.date, size: bk.size })
+            continue
+          }
           if (id === "theme-set") {
             if (q.target !== themeCurrent) out.push({ id: id, op: "theme-set", name: q.target, wallpaper: q.wallpaper || null })
             else if (q.wallpaper) out.push({ id: id, op: "theme-wallpaper", name: q.target, wallpaper: q.wallpaper })
@@ -304,11 +353,16 @@ ShellRoot {
           else out.push({ id: id, op: "put", section: t })
         }
         // The order apply.py runs them in (tools/apply.py ORDER).
-        var order = { disable: 0, move: 1, put: 2, enable: 2, remove: 3, "theme-set": 4, "theme-wallpaper": 4, "theme-remove": 5 }
+        var order = { disable: 0, move: 1, put: 2, enable: 2, remove: 3, "theme-set": 4, "theme-wallpaper": 4, "theme-remove": 5, "backup-restore": 6, "backup-delete": 7 }
         return out.sort(function (a, b) { return order[a.op] - order[b.op] })
       }
       function sectionName(s) { return { left: "left", center: "centre", right: "right" }[s] || s }
       function describe(o) {
+        if (o.op === "backup-restore" || o.op === "backup-delete") {
+          var what = (o.title || o.file) + " " + o.kind
+          return o.op === "backup-restore" ? "Restore the " + what + " (removed " + o.date + ")"
+                                           : "Permanently delete the backup of the " + what + " (" + fmtSize(o.size) + ")"
+        }
         if (o.op === "theme-set" || o.op === "theme-wallpaper" || o.op === "theme-remove") {
           var t = themeByName(o.name), tname = t ? t.title : o.name
           var wp = o.wallpaper ? " (wallpaper " + o.wallpaper.name + ")" : ""
@@ -336,7 +390,8 @@ ShellRoot {
         return "will go " + (current(p) === "off" || current(p) === "loaded" ? "on the bar, " : "to the ") + sectionName(t)
       }
 
-      // Apply: removals get a fresh git check and a confirmation first.
+      // Apply: removals get a fresh git check and a confirmation first, and
+      // permanent backup deletes a confirmation.
       function startApply() {
         var list = ops()
         if (!list.length) return
@@ -347,11 +402,14 @@ ShellRoot {
           confirmOpen = true
           checkProc.command = backend("removal-check.py", removes)
           checkProc.running = true
+        } else if (list.some(function (o) { return o.op === "backup-delete" })) {
+          removalInfo = {}
+          confirmOpen = true
         } else run(list)
       }
       function run(list) {
         confirmOpen = false
-        progress = list.map(function (o) { return { id: o.id, op: o.op, name: o.name || "", wallpaper: o.wallpaper || null, bundledWith: o.bundledWith || "", section: o.section || "", status: "queued", msg: "" } })
+        progress = list.map(function (o) { return { id: o.id, op: o.op, name: o.name || "", kind: o.kind || "", file: o.file || "", title: o.title || "", date: o.date || "", size: o.size || 0, wallpaper: o.wallpaper || null, bundledWith: o.bundledWith || "", section: o.section || "", status: "queued", msg: "" } })
         progressSummary = ""
         progressOpen = true
         applyProc.command = backend("apply.py", [JSON.stringify(list)])
@@ -460,6 +518,23 @@ ShellRoot {
         }
       }
       Process {
+        id: backupsProc
+        command: root.backend("backups.py", [])
+        stdout: StdioCollector {
+          onStreamFinished: {
+            try { root.backups = JSON.parse(text).backups || [] } catch (e) { root.loadError = "Couldn't read backups: " + e }
+            var next = {}
+            for (var id in root.pending) {
+              if (id.indexOf("backup:") !== 0) { next[id] = root.pending[id]; continue }
+              var b = root.backupById(id)
+              if (b && !(root.pending[id].action === "restore" && b.installed)) next[id] = root.pending[id]
+            }
+            root.pending = next
+            root.rev++
+          }
+        }
+      }
+      Process {
         id: checkProc
         stdout: StdioCollector {
           onStreamFinished: {
@@ -497,7 +572,7 @@ ShellRoot {
             Row {
               id: title
               Repeater {
-                model: [{ k: "plugins", l: "Plugins" }, { k: "themes", l: "Themes" }]
+                model: [{ k: "plugins", l: "Plugins" }, { k: "themes", l: "Themes" }, { k: "backups", l: "Backups" }]
                 Rectangle {
                   required property var modelData
                   readonly property bool on: root.tab === modelData.k
@@ -516,7 +591,9 @@ ShellRoot {
             }
             Txt {
               id: countTxt
-              text: root.loading ? "reading…" : root.tab === "themes"
+              text: root.loading ? "reading…" : root.tab === "backups"
+                    ? root.backups.length + " backups · " + root.fmtSize(root.backupsSize)
+                    : root.tab === "themes"
                     ? root.themes.length + " themes" + (root.themeCurrent ? " · using " + ((root.themeByName(root.themeCurrent) || {}).title || root.themeCurrent) : "")
                     : root.plugins.length + " installed"
               color: Theme.faint; height: Theme.px(30)
@@ -542,10 +619,25 @@ ShellRoot {
               Txt {
                 visible: searchInput.text === "" && !searchInput.activeFocus
                 anchors.fill: parent; anchors.leftMargin: Theme.px(8)
-                text: (root.tab === "themes" ? "Search themes…" : "Search name, id, author…") + "  (Ctrl+F)"; color: Theme.faint
+                text: (root.tab === "themes" ? "Search themes…" : root.tab === "backups" ? "Search backups…" : "Search name, id, author…") + "  (Ctrl+F)"; color: Theme.faint
               }
             }
-            Btn { id: refreshBtn; text: "Refresh"; tip: "Re-read plugins and themes"; onClicked: root.refresh() }
+            Btn { id: refreshBtn; text: "Refresh"; tip: "Re-read plugins, themes and backups"; onClicked: root.refresh() }
+          }
+          Flow {
+            visible: root.tab === "backups"
+            width: parent.width
+            spacing: Theme.px(6)
+            Repeater {
+              model: [{ key: "all", label: "All" }, { key: "themes", label: "Themes" },
+                      { key: "plugins", label: "Plugins" }, { key: "pending", label: "Queued" }]
+              Btn {
+                required property var modelData
+                text: modelData.label + "  " + root.backupCountFor(modelData.key)
+                active: root.filter === modelData.key
+                onClicked: root.filter = modelData.key
+              }
+            }
           }
           Flow {
             visible: root.tab === "themes"
@@ -886,6 +978,79 @@ ShellRoot {
         }
       }
 
+      // --------------------------------------------------------------- backups
+      ListView {
+        id: backupList
+        visible: root.tab === "backups"
+        anchors { top: header.bottom; left: parent.left; right: parent.right; bottom: footer.top }
+        clip: true
+        model: root.visibleBackups
+        boundsBehavior: Flickable.StopAtBounds
+        opacity: root.locked ? 0.55 : 1
+        ScrollBar.vertical: ScrollBar {}
+        delegate: Rectangle {
+          id: bRow
+          required property var modelData
+          readonly property var b: modelData
+          readonly property string action: root.backupAction(b)
+          width: backupList.width
+          height: bCol.implicitHeight + Theme.px(18)
+          color: action ? Theme.a(action === "delete" ? Theme.red : Theme.accent, 0.07) : bMa.containsMouse ? Theme.a(Theme.fg, 0.03) : "transparent"
+          MouseArea { id: bMa; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
+          Rectangle { visible: bRow.action !== ""; width: 3; height: parent.height; color: bRow.action === "delete" ? Theme.red : Theme.accent }
+          Column {
+            id: bCol
+            anchors { left: parent.left; right: bButtons.left; verticalCenter: parent.verticalCenter; leftMargin: Theme.px(14); rightMargin: Theme.px(12) }
+            spacing: Theme.px(3)
+            Row {
+              spacing: Theme.px(8)
+              Txt { text: bRow.b.title; font.bold: true; font.strikeout: bRow.action === "delete"; color: bRow.action === "delete" ? Theme.faint : Theme.fg }
+              Txt { text: bRow.b.name !== bRow.b.title ? bRow.b.name : ""; color: Theme.faint; font.pixelSize: Theme.fsSmall; height: Theme.px(18) }
+            }
+            Flow {
+              width: parent.width
+              spacing: Theme.px(5)
+              Chip { text: bRow.b.kind === "theme" ? "theme" : "plugin"; tone: Theme.blue }
+              Chip { text: "removed " + bRow.b.date; tone: Theme.muted }
+              Chip { text: root.fmtSize(bRow.b.size); tone: Theme.muted }
+              Chip { visible: bRow.b.installed; text: "installed again since"; tone: Theme.yellow }
+              Txt {
+                visible: bRow.action !== ""
+                text: "→ " + (bRow.action === "restore" ? "will be restored" : "will be deleted for good")
+                color: bRow.action === "delete" ? Theme.red : Theme.accent
+                font.pixelSize: Theme.fsSmall
+              }
+            }
+          }
+          Row {
+            id: bButtons
+            anchors { right: parent.right; verticalCenter: parent.verticalCenter; rightMargin: Theme.px(14) }
+            spacing: Theme.px(8)
+            Btn {
+              text: "Restore"
+              active: bRow.action === "restore"
+              opacity: bRow.b.installed ? 0.35 : 1
+              tip: bRow.b.installed ? "Uninstall the one installed now first" : "Put it back where it was"
+              onClicked: root.setBackupAction(bRow.b, "restore")
+            }
+            Btn {
+              text: "Delete"
+              active: bRow.action === "delete"
+              textColor: bRow.action === "delete" ? Theme.accent : Theme.red
+              tip: "Delete this backup permanently"
+              onClicked: root.setBackupAction(bRow.b, "delete")
+            }
+          }
+          Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.divider }
+        }
+        Txt {
+          anchors.centerIn: parent
+          visible: backupList.count === 0 && !root.loading
+          text: root.filter === "pending" ? "Nothing queued." : root.backups.length ? "No backups match." : "No backups. Uninstalled themes, and plugins that aren't git checkouts, leave one here."
+          color: Theme.faint
+        }
+      }
+
       // ---------------------------------------------------------------- footer
       Rectangle {
         id: footer
@@ -897,6 +1062,8 @@ ShellRoot {
           anchors { left: parent.left; leftMargin: Theme.px(14); verticalCenter: parent.verticalCenter; right: footerBtns.left; rightMargin: Theme.px(12) }
           text: root.pendingCount
                 ? root.pendingCount + " change" + (root.pendingCount === 1 ? "" : "s") + " queued — nothing happens until you apply"
+                : root.tab === "backups"
+                  ? "Restore puts a theme or plugin back; Delete removes its backup for good. Nothing changes until you apply."
                 : root.tab === "themes"
                   ? "Pick a theme to use and any to uninstall; nothing changes until you apply. Uninstalled themes are backed up first."
                   : "Pick changes below; they're queued, then applied together (the bar reloads once per change while it runs)."
@@ -955,7 +1122,7 @@ ShellRoot {
                 readonly property var p: root.byId(modelData.id)
                 width: confirmCol.width
                 spacing: Theme.px(2)
-                Txt { text: "• " + root.describe(modelData); color: modelData.op === "remove" || modelData.op === "theme-remove" ? Theme.red : Theme.fg; width: parent.width }
+                Txt { text: "• " + root.describe(modelData); color: modelData.op === "remove" || modelData.op === "theme-remove" || modelData.op === "backup-delete" ? Theme.red : Theme.fg; width: parent.width }
                 Txt {
                   visible: !!(parent.info && parent.info.warning)
                   text: "   ⚠ " + (parent.info ? parent.info.warning : "")
@@ -991,6 +1158,16 @@ ShellRoot {
                   text: "   ⚠ " + kept.length + " plugin" + (kept.length === 1 ? "" : "s") + " that came with it stay" + (kept.length === 1 ? "s" : "") + " installed: "
                         + kept.slice(0, 4).map(function (b) { return b.name }).join(", ") + (kept.length > 4 ? "…" : "")
                   color: Theme.yellow; wrapMode: Text.Wrap; width: parent.width
+                }
+                Txt {
+                  visible: modelData.op === "backup-delete"
+                  text: "   ⚠ this can't be undone"
+                  color: Theme.yellow; font.pixelSize: Theme.fsSmall
+                }
+                Txt {
+                  visible: modelData.op === "backup-restore"
+                  text: modelData.kind === "plugin" ? "   comes back off the bar; place it from the Plugins tab" : "   back in the Themes tab, ready to use"
+                  color: Theme.faint; font.pixelSize: Theme.fsSmall
                 }
                 Txt {
                   readonly property var th: modelData.op === "theme-remove" ? root.themeByName(modelData.name) : null
@@ -1113,7 +1290,7 @@ ShellRoot {
                        : modelData.status === "running" ? Theme.accent : Theme.faint
                 }
                 Txt {
-                  visible: modelData.msg !== "" && (modelData.status !== "ok" || modelData.op === "theme-remove")
+                  visible: modelData.msg !== "" && (modelData.status !== "ok" || modelData.op === "theme-remove" || modelData.op === "backup-restore")
                   width: parent.width
                   text: "    " + modelData.msg
                   color: Theme.faint; font.pixelSize: Theme.fsSmall; wrapMode: Text.Wrap; elide: Text.ElideNone

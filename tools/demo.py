@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand-in backend for `plugboard --demo`: made-up plugins, nothing touched.
 
-    demo.py state | themes | check <id>... | apply '<ops json>'
+    demo.py state | themes | backups | check <id>... | apply '<ops json>'
 
 Serves demo/fixture.json (public marketplace plugins plus Omarchy's own) so
 the UI can be shown or screenshotted without anyone's real plugin list, and
@@ -36,6 +36,18 @@ def themes():
     return data
 
 
+DEMO_BACKUPS = [
+    {"kind": "theme", "name": "osaka-jade", "title": "Osaka Jade", "file": "osaka-jade-20261028-211502.tar.gz",
+     "date": "2026-10-28 21:15", "size": 18234112, "installed": False},
+    {"kind": "theme", "name": "lumon", "title": "Lumon", "file": "lumon-20261024-090311.tar.gz",
+     "date": "2026-10-24 09:03", "size": 6512331, "installed": True},
+    {"kind": "plugin", "name": "local.neon-meter", "title": "Neon Meter", "file": ".local.neon-meter.bak.20261026184502",
+     "date": "2026-10-26 18:45", "size": 48211, "installed": False},
+    {"kind": "plugin", "name": "local.pomodoro", "title": "Pomodoro", "file": ".local.pomodoro.bak.20261019120044",
+     "date": "2026-10-19 12:00", "size": 23552, "installed": False},
+]
+
+
 def main(argv):
     cmd = argv[0] if argv else ""
     if cmd == "state":
@@ -44,6 +56,8 @@ def main(argv):
             print(f.read())
     elif cmd == "themes":
         print(json.dumps(themes()))
+    elif cmd == "backups":
+        print(json.dumps({"error": "", "backups": [dict(b, id="backup:%s:%s" % (b["kind"], b["file"])) for b in DEMO_BACKUPS]}))
     elif cmd == "check":
         out = {}
         for pid in argv[1:]:
@@ -69,7 +83,7 @@ def main(argv):
             print(json.dumps({"i": i, "id": op["id"], "op": op["op"], "status": "ok", "msg": ""}), flush=True)
         print(json.dumps({"status": "done", "ok": len(ops), "failed": 0, "shellReady": True}), flush=True)
     else:
-        sys.exit("usage: demo.py state | themes | check <id>... | apply '<ops json>'")
+        sys.exit("usage: demo.py state | themes | backups | check <id>... | apply '<ops json>'")
 
 
 if __name__ == "__main__":

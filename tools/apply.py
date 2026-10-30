@@ -5,7 +5,8 @@
 
 ops: enable, disable, put (onto a bar section), move (to a bar section),
 remove (uninstall); theme-set (with "name", optionally "wallpaper"),
-theme-wallpaper (with "name" and "wallpaper") and theme-remove (with "name"). Each plugin
+theme-wallpaper (with "name" and "wallpaper") and theme-remove (with "name");
+backup-restore and backup-delete (with "kind" theme|plugin and "file"). Each plugin
 change makes the shell rebuild the bar, so before
 every step this waits for the shell to answer again. Prints one JSON line
 per event for the UI and appends the same to ~/.local/state/plugboard/apply.log.
@@ -13,6 +14,7 @@ per event for the UI and appends the same to ~/.local/state/plugboard/apply.log.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -28,7 +30,10 @@ STAGED_THEME = os.path.expanduser("~/.local/state/omarchy/current/theme")
 CURRENT_BG = os.path.expanduser("~/.local/state/omarchy/current/background")
 USER_BGS = os.path.expanduser("~/.config/omarchy/backgrounds")
 # Switch before removing, so a batch can move off a theme and then delete it.
-ORDER = {"disable": 0, "move": 1, "put": 2, "enable": 2, "remove": 3, "theme-set": 4, "theme-wallpaper": 4, "theme-remove": 5}
+ORDER = {"disable": 0, "move": 1, "put": 2, "enable": 2, "remove": 3, "theme-set": 4, "theme-wallpaper": 4, "theme-remove": 5,
+         "backup-restore": 6, "backup-delete": 7}
+THEME_BACKUP_RE = re.compile(r"^(?P<name>[A-Za-z0-9_][A-Za-z0-9._+-]*)-\d{8}-\d{6}\.tar\.gz$")
+PLUGIN_BACKUP_RE = re.compile(r"^\.(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)\.bak\.\d{14}(?:-\d+)?$")
 BUSY = ("not responding", "not running", "not ready")
 
 os.makedirs(os.path.dirname(LOG), exist_ok=True)
@@ -223,7 +228,58 @@ def theme_step(op):
     return 0, ("backup: " + backup.replace(os.path.expanduser("~"), "~")) if backup else ""
 
 
+def backup_step(op):
+    """Restore a backup to where it came from (then drop it), or delete it for good."""
+    kind, f = op.get("kind"), str(op.get("file") or "")
+    if kind == "theme":
+        m = THEME_BACKUP_RE.match(f)
+        path = os.path.join(THEME_BACKUPS, f)
+    elif kind == "plugin":
+        m = PLUGIN_BACKUP_RE.match(f)
+        path = os.path.join(PLUGINS_DIR, f)
+    else:
+        return 1, "unknown backup kind"
+    if not m:
+        return 1, "not a backup name Plugboard recognises"
+    if not os.path.lexists(path) or os.path.islink(path):
+        return 1, "backup not found"
+    name = m.group("name")
+    if op["op"] == "backup-delete":
+        if kind == "theme":
+            os.remove(path)
+        else:
+            shutil.rmtree(path)
+        return 0, ""
+    if kind == "plugin":
+        target = os.path.join(PLUGINS_DIR, name)
+        if os.path.lexists(target):
+            return 1, "a plugin called %s is installed again; uninstall it first" % name
+        os.rename(path, target)
+        shell_cmd(["omarchy-shell", "shell", "rescanPlugins"])
+        return 0, "restored; it's off the bar until you place it"
+    target = os.path.join(THEMES_DIR, name)
+    if os.path.lexists(target):
+        return 1, "a theme called %s is installed again; uninstall it first" % name
+    staging = os.path.join(THEMES_DIR, ".plugboard-restore-" + name)
+    shutil.rmtree(staging, ignore_errors=True)
+    os.makedirs(staging)
+    try:
+        with tarfile.open(path, "r:gz") as tar:
+            members = tar.getmembers()
+            if not members or any(x.name != name and not x.name.startswith(name + "/") for x in members):
+                return 1, "the archive doesn't hold just the %s theme" % name
+            # "data" refuses absolute paths, links out of the archive and device files.
+            tar.extractall(staging, members=members, filter="data")
+        os.rename(os.path.join(staging, name), target)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    os.remove(path)
+    return 0, "restored"
+
+
 def step(op):
+    if op["op"] in ("backup-restore", "backup-delete"):
+        return backup_step(op)
     if op["op"] in ("theme-set", "theme-wallpaper", "theme-remove"):
         return theme_step(op)
     if op["op"] == "remove":
