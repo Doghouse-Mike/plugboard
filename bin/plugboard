@@ -1,7 +1,7 @@
 #!/bin/bash
 # Plugboard launcher: one instance; a second launch raises the existing window.
 #   plugboard [--demo]
-# --demo shows made-up plugins (demo/fixture.json) and changes nothing.
+# --demo shows made-up plugins and themes, and changes nothing.
 set -euo pipefail
 APP="$(readlink -f "$(dirname "$(readlink -f "$0")")/../app")"
 

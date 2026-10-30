@@ -12,6 +12,8 @@ import subprocess
 import sys
 
 USER_DIR = os.path.expanduser("~/.config/omarchy/plugins")
+THEMES_DIR = os.path.expanduser("~/.config/omarchy/themes")
+THEME_BACKUPS = "~/.local/share/plugboard/theme-backups"
 
 
 def git(path, *args, timeout=20):
@@ -29,6 +31,10 @@ def check(pid):
     if not os.path.isdir(os.path.join(path, ".git")):
         return {"kind": "local", "warning": "",
                 "note": "folder is moved to a .bak backup, not deleted"}
+    return check_git(path)
+
+
+def check_git(path):
     rc, dirty = git(path, "status", "--porcelain", "--untracked-files=normal")
     if rc == 0 and dirty:
         n = len(dirty.splitlines())
@@ -46,8 +52,28 @@ def check(pid):
     return {"kind": "git", "warning": "", "note": "deleted; its repo remains upstream"}
 
 
+def check_theme(name):
+    """Plugboard backs a theme up before `omarchy theme remove` deletes it,
+    so nothing is lost either way; this says what the backup is for."""
+    path = os.path.join(THEMES_DIR, name)
+    if os.path.islink(path):
+        return {"kind": "symlink", "warning": "",
+                "note": "only the link is removed; " + os.path.realpath(path) + " is kept"}
+    builtin = os.path.isdir(os.path.join(os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy", "themes", name))
+    after = " Omarchy's built-in theme of the same name takes its place." if builtin else ""
+    if not os.path.isdir(os.path.join(path, ".git")):
+        return {"kind": "local", "warning": "not from a git repo, so this is the only copy",
+                "note": "a backup goes in " + THEME_BACKUPS + "." + after}
+    info = check_git(path)
+    info["note"] = "a backup goes in " + THEME_BACKUPS + (" anyway; its repo remains upstream." if not info["warning"] else ".") + after
+    return info
+
+
 def main(ids):
-    print(json.dumps({pid: check(pid) for pid in ids}))
+    out = {}
+    for pid in ids:
+        out[pid] = check_theme(pid[len("theme:"):]) if pid.startswith("theme:") else check(pid)
+    print(json.dumps(out))
 
 
 if __name__ == "__main__":

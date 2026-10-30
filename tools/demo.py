@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand-in backend for `plugboard --demo`: made-up plugins, nothing touched.
 
-    demo.py state | check <id>... | apply '<ops json>'
+    demo.py state | themes | check <id>... | apply '<ops json>'
 
 Serves demo/fixture.json (public marketplace plugins plus Omarchy's own) so
 the UI can be shown or screenshotted without anyone's real plugin list, and
@@ -9,10 +9,31 @@ fakes the uninstall check and the apply run.
 """
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import time
 
-FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "demo", "fixture.json")
+HERE = os.path.dirname(os.path.abspath(__file__))
+FIXTURE = os.path.join(HERE, "..", "demo", "fixture.json")
+# Omarchy's own themes, a few dressed up as installed ones so uninstalling shows.
+DEMO_USER_THEMES = {"hackerman": "https://github.com/example/omarchy-hackerman-theme",
+                    "lumon": "", "retro-82": "https://github.com/example/omarchy-retro-82-theme"}
+DEMO_CURRENT = "tokyo-night"
+
+
+def themes():
+    with tempfile.TemporaryDirectory() as home:   # an empty home: built-ins only
+        out = subprocess.run([sys.executable, "-I", os.path.join(HERE, "themes.py")], capture_output=True,
+                             text=True, env={**os.environ, "HOME": home}).stdout
+    data = json.loads(out)
+    for t in data["themes"]:
+        if t["name"] in DEMO_USER_THEMES:
+            url = DEMO_USER_THEMES[t["name"]]
+            t.update(user=True, builtin=False, source="git" if url else "local", url=url)
+        t["current"] = t["name"] == DEMO_CURRENT
+    data["current"] = DEMO_CURRENT
+    return data
 
 
 def main(argv):
@@ -21,10 +42,17 @@ def main(argv):
         time.sleep(0.3)
         with open(FIXTURE) as f:
             print(f.read())
+    elif cmd == "themes":
+        print(json.dumps(themes()))
     elif cmd == "check":
         out = {}
         for pid in argv[1:]:
-            if pid == "matjam.omawall":
+            if pid.startswith("theme:"):
+                local = not DEMO_USER_THEMES.get(pid[6:])
+                out[pid] = {"kind": "local" if local else "git",
+                            "warning": "not from a git repo, so this is the only copy" if local else "",
+                            "note": "a backup goes in ~/.local/share/plugboard/theme-backups" + ("." if local else " anyway; its repo remains upstream.")}
+            elif pid == "matjam.omawall":
                 out[pid] = {"kind": "git", "warning": "2 uncommitted local change(s) will be deleted", "note": ""}
             elif pid.startswith("local."):
                 out[pid] = {"kind": "local", "warning": "", "note": "folder is moved to a .bak backup, not deleted"}
@@ -41,7 +69,7 @@ def main(argv):
             print(json.dumps({"i": i, "id": op["id"], "op": op["op"], "status": "ok", "msg": ""}), flush=True)
         print(json.dumps({"status": "done", "ok": len(ops), "failed": 0, "shellReady": True}), flush=True)
     else:
-        sys.exit("usage: demo.py state | check <id>... | apply '<ops json>'")
+        sys.exit("usage: demo.py state | themes | check <id>... | apply '<ops json>'")
 
 
 if __name__ == "__main__":

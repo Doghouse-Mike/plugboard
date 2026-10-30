@@ -1,7 +1,7 @@
 # Plugboard
 
-A plugin manager for the [Omarchy](https://omarchy.org) shell that lets you
-**queue up changes and apply them together**, in its own window.
+A plugin and theme manager for the [Omarchy](https://omarchy.org) shell that
+lets you **queue up changes and apply them together**, in its own window.
 
 Plugin managers that live in the bar close every time a change rebuilds the
 bar, so working through a dozen changes means reopening the panel a dozen
@@ -42,6 +42,23 @@ stops that from being your problem. Collapsing them into one rebuild would
 mean writing `shell.json` behind the shell's back, which it deliberately
 doesn't do.
 
+## Themes
+
+The **Themes** tab shows every theme, Omarchy's own and the ones you
+installed, with its preview (or its colours, if it ships no preview). Queue
+a switch with **Use** and uninstall the ones you installed; both go through
+the same Apply as plugins, switch first.
+
+![Themes](docs/themes.png)
+
+- **Uninstalled themes are backed up first**, to
+  `~/.local/share/plugboard/theme-backups/`. `omarchy theme remove` deletes
+  the folder outright, and a theme you made yourself may be the only copy; the
+  confirmation says which ones are.
+- **The theme in use can't be uninstalled** unless the same batch switches
+  away from it first. A theme you installed under a built-in's name is marked
+  *replaces Omarchy's*; uninstalling it brings the built-in back.
+
 ## Careful around
 
 - **Tray-drawer widgets** (e.g. from
@@ -71,7 +88,7 @@ cp ~/.local/share/plugboard/plugboard.desktop ~/.local/share/applications/   # o
 
 ```bash
 plugboard          # open, or raise the running window
-plugboard --demo   # made-up plugins (demo/fixture.json); changes nothing
+plugboard --demo   # made-up plugins and themes; changes nothing
 ```
 
 `Ctrl+F` searches, `Esc` closes dialogs, `Ctrl+Q` quits. Every apply is
@@ -80,13 +97,16 @@ logged to `~/.local/state/plugboard/apply.log`.
 ## How it's put together
 
 - `app/` — the Quickshell UI. IPC target `plugboard`: `show`, `state`,
-  `queue <id> <off|on|left|center|right|remove>`, `apply`, `confirm`,
+  `tab <plugins|themes>`, `queue <id> <off|on|left|center|right|remove>`
+  (`queue theme:<name> <use|remove>` for themes), `apply`, `confirm`,
   `discard`, `snapshot <png>` (handy for scripting and tests).
 - `tools/state.py` — read-only snapshot: `omarchy plugin list --json`, plus
   placement from `~/.config/omarchy/shell.json` and each plugin's git state.
+- `tools/themes.py` — read-only snapshot of the themes, the one in use and
+  each one's source and preview.
 - `tools/removal-check.py` — what an uninstall would lose.
 - `tools/apply.py` — runs the queue and reports each step as JSON lines.
-- `tools/demo.py` — the `--demo` stand-in for all three.
+- `tools/demo.py` — the `--demo` stand-in for all of these.
 
 ## License
 

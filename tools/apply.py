@@ -1,23 +1,30 @@
 #!/usr/bin/env python3
-"""Apply a queue of plugin changes, one after another, through Omarchy's own CLI.
+"""Apply a queue of plugin and theme changes, one after another, through Omarchy's own CLI.
 
     apply.py '[{"id": "...", "op": "put", "section": "right"}, ...]'
 
 ops: enable, disable, put (onto a bar section), move (to a bar section),
-remove (uninstall). Each change makes the shell rebuild the bar, so before
+remove (uninstall); theme-set and theme-remove (with "name"). Each plugin
+change makes the shell rebuild the bar, so before
 every step this waits for the shell to answer again. Prints one JSON line
 per event for the UI and appends the same to ~/.local/state/plugboard/apply.log.
 """
 import json
 import os
+import re
 import subprocess
 import sys
+import tarfile
 import time
 
 SHELL_JSON = os.path.expanduser("~/.config/omarchy/shell.json")
 PLUGINS_DIR = os.path.expanduser("~/.config/omarchy/plugins")
 LOG = os.path.expanduser("~/.local/state/plugboard/apply.log")
-ORDER = {"disable": 0, "move": 1, "put": 2, "enable": 2, "remove": 3}
+THEMES_DIR = os.path.expanduser("~/.config/omarchy/themes")
+THEME_BACKUPS = os.path.expanduser("~/.local/share/plugboard/theme-backups")
+CURRENT_THEME = os.path.expanduser("~/.local/state/omarchy/current/theme.name")
+# Switch before removing, so a batch can move off a theme and then delete it.
+ORDER = {"disable": 0, "move": 1, "put": 2, "enable": 2, "remove": 3, "theme-set": 4, "theme-remove": 5}
 BUSY = ("not responding", "not running", "not ready")
 
 os.makedirs(os.path.dirname(LOG), exist_ok=True)
@@ -151,7 +158,47 @@ def command(op):
     return ["omarchy", "plugin", "remove", pid, "--yes"]
 
 
+def current_theme():
+    try:
+        with open(CURRENT_THEME, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def theme_step(op):
+    name = op.get("name", "")
+    # The same rule `omarchy theme install` holds names to.
+    if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9._+-]*$", name):
+        return 1, "bad theme name"
+    if op["op"] == "theme-set":
+        rc, out = run(["omarchy", "theme", "set", name])
+        if current_theme() != name:
+            return 1, "the theme is still " + (current_theme() or "unknown") + (f" ({out})" if out else "")
+        return 0, ""
+    path = os.path.join(THEMES_DIR, name)
+    if current_theme() == name:
+        return 1, "it's the theme in use; switch to another one first"
+    if not os.path.lexists(path):
+        return 1, "not installed in ~/.config/omarchy/themes"
+    # `omarchy theme remove` deletes the folder outright; keep a copy first.
+    # A symlinked theme is someone's working copy elsewhere: only the link goes.
+    backup = ""
+    if not os.path.islink(path):
+        os.makedirs(THEME_BACKUPS, exist_ok=True)
+        backup = os.path.join(THEME_BACKUPS, "%s-%s.tar.gz" % (name, time.strftime("%Y%m%d-%H%M%S")))
+        with tarfile.open(backup, "w:gz") as tar:
+            tar.add(path, arcname=name)
+        emit(id=op["id"], status="info", msg="backed up to " + backup.replace(os.path.expanduser("~"), "~"))
+    rc, out = run(["omarchy", "theme", "remove", name])
+    if os.path.lexists(path):
+        return 1, "its folder is still there" + (f" ({out})" if out else "")
+    return 0, ("backup: " + backup.replace(os.path.expanduser("~"), "~")) if backup else ""
+
+
 def step(op):
+    if op["op"] in ("theme-set", "theme-remove"):
+        return theme_step(op)
     if op["op"] == "remove":
         rc, out = drop_from_hosts(op["id"])
         if rc != 0:

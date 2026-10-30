@@ -7,7 +7,7 @@ import Quickshell.Io
 import "components"
 
 // Plugboard: queue Omarchy plugin changes (bar placement, on/off, uninstall)
-// and apply them in one go. Runs as its own process, so the bar rebuild each
+// and theme changes (switch, uninstall), and apply them in one go. Runs as its own process, so the bar rebuild each
 // change triggers can't close it.
 ShellRoot {
   id: shell
@@ -17,12 +17,21 @@ ShellRoot {
     function show(): void { win.visible = true }
     function quit(): void { Qt.quit() }
     function state(): string {
-      return JSON.stringify({ plugins: root.plugins.length, pending: root.pendingCount, busy: root.busy, loading: root.loading, filter: root.filter })
+      return JSON.stringify({ plugins: root.plugins.length, themes: root.themes.length, currentTheme: root.themeCurrent,
+                              pending: root.pendingCount, busy: root.busy, loading: root.loading, tab: root.tab, filter: root.filter })
     }
     function filterBy(name: string): void { root.filter = name }
+    function tab(name: string): void { root.switchTab(name) }
     function search(text: string): void { searchInput.text = text }
     // Test hooks: queue/apply without real input, and render the window to a PNG.
     function queue(id: string, target: string): string {
+      if (id.indexOf("theme:") === 0) {
+        var t = root.themeByName(id.slice(6))
+        if (!t) return "unknown"
+        if (target === "remove") root.toggleThemeRemove(t)
+        else root.useTheme(t)
+        return JSON.stringify(root.ops())
+      }
       var p = root.byId(id)
       if (!p) return "unknown"
       if (target === "remove") root.toggleRemove(p)
@@ -37,7 +46,7 @@ ShellRoot {
 
   FloatingWindow {
     id: win
-    title: "Plugboard — Omarchy plugins" + (Quickshell.env("PLUGBOARD_DEMO") === "1" ? " (demo)" : "")
+    title: "Plugboard — Omarchy plugins & themes" + (Quickshell.env("PLUGBOARD_DEMO") === "1" ? " (demo)" : "")
     implicitWidth: 1000
     implicitHeight: 760
     visible: true
@@ -52,15 +61,26 @@ ShellRoot {
       // `plugboard --demo`: made-up plugins from demo/fixture.json; nothing is changed.
       readonly property bool demo: Quickshell.env("PLUGBOARD_DEMO") === "1"
       function backend(script, args) {
-        return demo ? ["python3", "-I", tools + "/demo.py", { "state.py": "state", "removal-check.py": "check", "apply.py": "apply" }[script]].concat(args)
+        return demo ? ["python3", "-I", tools + "/demo.py", { "state.py": "state", "themes.py": "themes", "removal-check.py": "check", "apply.py": "apply" }[script]].concat(args)
                     : ["python3", "-I", tools + "/" + script].concat(args)
       }
 
       property var plugins: []
       property string loadError: ""
-      property bool loading: false
+      property bool loading: stateProc.running || themesProc.running
 
-      // id -> { target: "off"|"on"|"left"|"center"|"right", remove: bool }
+      property var themes: []
+      property string themeCurrent: ""
+
+      property string tab: "plugins"
+      function switchTab(name) {
+        if (tab === name) return
+        tab = name
+        filter = "all"
+      }
+
+      // Plugins: id -> { target: "off"|"on"|"left"|"center"|"right", remove: bool }
+      // Themes: "theme-set" -> { target: name }; "theme:<name>" -> { remove: true }
       property var pending: ({})
       property int rev: 0
       readonly property int pendingCount: { rev; return Object.keys(pending).length }
@@ -88,9 +108,8 @@ ShellRoot {
       }
 
       function refresh() {
-        if (stateProc.running) return
-        loading = true
-        stateProc.running = true
+        if (!stateProc.running) stateProc.running = true
+        if (!themesProc.running) themesProc.running = true
       }
 
       function current(p) {
@@ -135,6 +154,61 @@ ShellRoot {
       }
       function discard() { pending = {}; rev++ }
 
+      // ---- themes
+      function themeByName(name) {
+        for (var i = 0; i < themes.length; i++) if (themes[i].name === name) return themes[i]
+        return null
+      }
+      // The theme that will be in use once the queue runs.
+      function themeTarget() { rev; var q = pending["theme-set"]; return q ? q.target : themeCurrent }
+      function themeRemoving(t) { rev; return !!pending["theme:" + t.name] }
+      function useTheme(t) {
+        if (locked) return
+        var next = Object.assign({}, pending)
+        if (t.name === themeCurrent) delete next["theme-set"]
+        else next["theme-set"] = { target: t.name }
+        delete next["theme:" + t.name]
+        // The theme in use can only be removed while a switch away from it is queued.
+        if (!next["theme-set"]) delete next["theme:" + themeCurrent]
+        pending = next
+        rev++
+      }
+      function toggleThemeRemove(t) {
+        if (locked || !t.user) return
+        var key = "theme:" + t.name
+        if (!pending[key] && t.name === themeTarget()) return
+        store(key, pending[key] ? {} : { remove: true })
+      }
+      function themePendingLabel(t) {
+        rev
+        if (pending["theme:" + t.name]) return "will be uninstalled"
+        var q = pending["theme-set"]
+        if (q && q.target === t.name) return "will be switched to"
+        if (q && t.name === themeCurrent) return "will be switched away from"
+        return ""
+      }
+      readonly property var visibleThemes: {
+        rev
+        var q = searchInput.text.toLowerCase().trim()
+        return themes.filter(function (t) {
+          if (root.filter === "mine" && !t.user) return false
+          if (root.filter === "omarchy" && t.user) return false
+          if (root.filter === "pending" && !root.themePendingLabel(t)) return false
+          if (!q) return true
+          return (t.title + " " + t.name + " " + (t.url || "")).toLowerCase().indexOf(q) !== -1
+        })
+      }
+      function themeCountFor(f) {
+        rev
+        var n = 0
+        for (var i = 0; i < themes.length; i++) {
+          var t = themes[i]
+          if (f === "all" || (f === "mine" && t.user) || (f === "omarchy" && !t.user)
+              || (f === "pending" && themePendingLabel(t))) n++
+        }
+        return n
+      }
+
       function byId(id) {
         for (var i = 0; i < plugins.length; i++) if (plugins[i].id === id) return plugins[i]
         return null
@@ -143,7 +217,10 @@ ShellRoot {
       function ops() {
         var out = []
         for (var id in pending) {
-          var p = byId(id), q = pending[id]
+          var q = pending[id]
+          if (id === "theme-set") { if (q.target !== themeCurrent) out.push({ id: id, op: "theme-set", name: q.target }); continue }
+          if (id.indexOf("theme:") === 0) { out.push({ id: id, op: "theme-remove", name: id.slice(6) }); continue }
+          var p = byId(id)
           if (!p) continue
           if (q.remove) { out.push({ id: id, op: "remove" }); continue }
           var cur = current(p), t = q.target
@@ -153,10 +230,16 @@ ShellRoot {
           else if (cur === "left" || cur === "center" || cur === "right") out.push({ id: id, op: "move", section: t })
           else out.push({ id: id, op: "put", section: t })
         }
-        return out
+        // The order apply.py runs them in (tools/apply.py ORDER).
+        var order = { disable: 0, move: 1, put: 2, enable: 2, remove: 3, "theme-set": 4, "theme-remove": 5 }
+        return out.sort(function (a, b) { return order[a.op] - order[b.op] })
       }
       function sectionName(s) { return { left: "left", center: "centre", right: "right" }[s] || s }
       function describe(o) {
+        if (o.op === "theme-set" || o.op === "theme-remove") {
+          var t = themeByName(o.name), tname = t ? t.title : o.name
+          return (o.op === "theme-set" ? "Switch to the " : "Uninstall the ") + tname + " theme"
+        }
         var p = byId(o.id), name = p ? p.name : o.id
         if (o.op === "remove") return "Uninstall " + name
         if (o.op === "disable") return "Turn off " + name
@@ -179,7 +262,7 @@ ShellRoot {
       function startApply() {
         var list = ops()
         if (!list.length) return
-        var removes = list.filter(function (o) { return o.op === "remove" }).map(function (o) { return o.id })
+        var removes = list.filter(function (o) { return o.op === "remove" || o.op === "theme-remove" }).map(function (o) { return o.id })
         if (removes.length) {
           checking = true
           removalInfo = {}
@@ -190,7 +273,7 @@ ShellRoot {
       }
       function run(list) {
         confirmOpen = false
-        progress = list.map(function (o) { return { id: o.id, op: o.op, section: o.section || "", status: "queued", msg: "" } })
+        progress = list.map(function (o) { return { id: o.id, op: o.op, name: o.name || "", section: o.section || "", status: "queued", msg: "" } })
         progressSummary = ""
         progressOpen = true
         applyProc.command = backend("apply.py", [JSON.stringify(list)])
@@ -249,7 +332,6 @@ ShellRoot {
         command: root.backend("state.py", [])
         stdout: StdioCollector {
           onStreamFinished: {
-            root.loading = false
             try {
               var data = JSON.parse(text)
               root.loadError = data.error || ""
@@ -260,12 +342,39 @@ ShellRoot {
             // Drop queued changes that no longer apply (plugin gone, or already in that state).
             var next = {}
             for (var id in root.pending) {
+              if (id.indexOf("theme") === 0) { next[id] = root.pending[id]; continue }   // themesProc tidies these
               var p = root.byId(id)
               if (!p) continue
               var q = Object.assign({}, root.pending[id])
               if (q.target === root.current(p)) delete q.target
               if (Object.keys(q).length) next[id] = q
             }
+            root.pending = next
+            root.rev++
+          }
+        }
+      }
+      Process {
+        id: themesProc
+        command: root.backend("themes.py", [])
+        stdout: StdioCollector {
+          onStreamFinished: {
+            try {
+              var data = JSON.parse(text)
+              root.themes = data.themes || []
+              root.themeCurrent = data.current || ""
+            } catch (e) {
+              root.loadError = "Couldn't read themes: " + e
+            }
+            // Drop queued theme changes that no longer apply.
+            var next = {}
+            for (var id in root.pending) {
+              var q = root.pending[id]
+              if (id === "theme-set") { if (root.themeByName(q.target) && q.target !== root.themeCurrent) next[id] = q }
+              else if (id.indexOf("theme:") === 0) { var t = root.themeByName(id.slice(6)); if (t && t.user) next[id] = q }
+              else next[id] = q
+            }
+            if (!next["theme-set"]) delete next["theme:" + root.themeCurrent]
             root.pending = next
             root.rev++
           }
@@ -306,12 +415,34 @@ ShellRoot {
           Row {
             width: parent.width
             spacing: Theme.px(10)
-            Txt { id: title; text: "Plugins"; font.pixelSize: Theme.fsTitle; font.bold: true; height: Theme.px(28) }
-            Txt {
-              text: root.loading ? "reading…" : root.plugins.length + " installed"
-              color: Theme.faint; height: Theme.px(28)
+            Row {
+              id: title
+              Repeater {
+                model: [{ k: "plugins", l: "Plugins" }, { k: "themes", l: "Themes" }]
+                Rectangle {
+                  required property var modelData
+                  readonly property bool on: root.tab === modelData.k
+                  width: tabTxt.implicitWidth + Theme.px(20); height: Theme.px(30)
+                  color: "transparent"
+                  Txt {
+                    id: tabTxt; anchors.centerIn: parent
+                    text: parent.modelData.l
+                    font.pixelSize: Theme.fsTitle; font.bold: parent.on
+                    color: parent.on ? Theme.fg : Theme.faint
+                  }
+                  Rectangle { visible: parent.on; anchors.bottom: parent.bottom; width: parent.width; height: 2; color: Theme.accent }
+                  MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.switchTab(parent.modelData.k) }
+                }
+              }
             }
-            Item { width: parent.width - title.width - refreshBtn.width - searchBox.width - Theme.px(160); height: 1 }
+            Txt {
+              id: countTxt
+              text: root.loading ? "reading…" : root.tab === "themes"
+                    ? root.themes.length + " themes" + (root.themeCurrent ? " · using " + ((root.themeByName(root.themeCurrent) || {}).title || root.themeCurrent) : "")
+                    : root.plugins.length + " installed"
+              color: Theme.faint; height: Theme.px(30)
+            }
+            Item { width: Math.max(0, parent.width - title.width - countTxt.width - refreshBtn.width - searchBox.width - Theme.px(40)); height: 1 }
             Rectangle {
               id: searchBox
               width: Theme.px(280); height: Theme.px(28)
@@ -332,12 +463,28 @@ ShellRoot {
               Txt {
                 visible: searchInput.text === "" && !searchInput.activeFocus
                 anchors.fill: parent; anchors.leftMargin: Theme.px(8)
-                text: "Search name, id, author…  (Ctrl+F)"; color: Theme.faint
+                text: (root.tab === "themes" ? "Search themes…" : "Search name, id, author…") + "  (Ctrl+F)"; color: Theme.faint
               }
             }
-            Btn { id: refreshBtn; text: "Refresh"; tip: "Re-read plugin state"; onClicked: root.refresh() }
+            Btn { id: refreshBtn; text: "Refresh"; tip: "Re-read plugins and themes"; onClicked: root.refresh() }
           }
           Flow {
+            visible: root.tab === "themes"
+            width: parent.width
+            spacing: Theme.px(6)
+            Repeater {
+              model: [{ key: "all", label: "All" }, { key: "mine", label: "Installed by you" },
+                      { key: "omarchy", label: "Omarchy's own" }, { key: "pending", label: "Queued" }]
+              Btn {
+                required property var modelData
+                text: modelData.label + "  " + root.themeCountFor(modelData.key)
+                active: root.filter === modelData.key
+                onClicked: root.filter = modelData.key
+              }
+            }
+          }
+          Flow {
+            visible: root.tab === "plugins"
             width: parent.width
             spacing: Theme.px(6)
             Repeater {
@@ -369,6 +516,7 @@ ShellRoot {
       // ------------------------------------------------------------------ list
       ListView {
         id: list
+        visible: root.tab === "plugins"
         anchors { top: header.bottom; left: parent.left; right: parent.right; bottom: footer.top }
         clip: true
         model: root.visiblePlugins
@@ -523,6 +671,112 @@ ShellRoot {
         }
       }
 
+      // ---------------------------------------------------------------- themes
+      GridView {
+        id: grid
+        visible: root.tab === "themes"
+        anchors { top: header.bottom; left: parent.left; right: parent.right; bottom: footer.top; margins: Theme.px(10) }
+        clip: true
+        model: root.visibleThemes
+        boundsBehavior: Flickable.StopAtBounds
+        opacity: root.locked ? 0.55 : 1
+        ScrollBar.vertical: ScrollBar {}
+        readonly property int cols: Math.max(1, Math.floor(width / Theme.px(250)))
+        cellWidth: Math.floor(width / cols)
+        cellHeight: (cellWidth - Theme.px(28)) * 0.5625 + Theme.px(92)
+        delegate: Item {
+          id: card
+          required property var modelData
+          readonly property var t: modelData
+          readonly property bool rm: root.themeRemoving(t)
+          readonly property bool target: root.themeTarget() === t.name
+          readonly property string label: root.themePendingLabel(t)
+          readonly property real buttonsWidth: (useBtn.visible ? useBtn.width + Theme.px(6) : 0) + (rmBtn.visible ? rmBtn.width + Theme.px(6) : 0)
+          width: grid.cellWidth; height: grid.cellHeight
+          Rectangle {
+            anchors.fill: parent; anchors.margins: Theme.px(6)
+            color: card.label ? Theme.a(card.rm ? Theme.red : Theme.accent, 0.08) : cardMa.containsMouse ? Theme.a(Theme.fg, 0.04) : Theme.normalFill
+            border.width: card.target || card.label ? 2 : 1
+            border.color: card.rm ? Theme.red : card.target ? Theme.accent : Theme.a(Theme.fg, 0.14)
+            MouseArea { id: cardMa; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
+            Column {
+              anchors { fill: parent; margins: Theme.px(8) }
+              spacing: Theme.px(6)
+              Item {
+                width: parent.width; height: width * 0.5625
+                clip: true
+                Image {
+                  id: shot
+                  anchors.fill: parent
+                  source: card.t.preview ? "file://" + card.t.preview : ""
+                  sourceSize.width: Theme.px(480)
+                  fillMode: Image.PreserveAspectCrop
+                  asynchronous: true; cache: false
+                  opacity: card.rm ? 0.35 : 1
+                }
+                // No preview image: show the theme's colours instead.
+                Row {
+                  visible: shot.status === Image.Error || shot.status === Image.Null
+                  anchors.fill: parent
+                  Repeater {
+                    model: card.t.colours
+                    Rectangle { required property string modelData; width: parent.width / Math.max(1, card.t.colours.length); height: parent.height; color: modelData }
+                  }
+                }
+                Txt {
+                  visible: (shot.status === Image.Error || shot.status === Image.Null) && card.t.colours.length === 0
+                  anchors.centerIn: parent; text: "no preview"; color: Theme.faint
+                }
+              }
+              Row {
+                width: parent.width
+                spacing: Theme.px(6)
+                Txt {
+                  id: themeName
+                  text: card.t.title; font.bold: true; font.strikeout: card.rm
+                  width: Math.min(implicitWidth, parent.width - card.buttonsWidth)
+                  height: Theme.px(26)
+                }
+                Item { width: Math.max(0, parent.width - themeName.width - card.buttonsWidth); height: 1 }
+                Btn {
+                  id: useBtn
+                  visible: !card.rm
+                  text: card.t.name === root.themeCurrent && !card.label ? "In use" : "Use"
+                  active: card.target
+                  tip: card.target ? "This will be the theme" : "Queue a switch to this theme"
+                  onClicked: root.useTheme(card.t)
+                }
+                Btn {
+                  id: rmBtn
+                  visible: card.t.user && (!card.target || card.rm)
+                  text: card.rm ? "Keep" : "Uninstall"
+                  textColor: card.rm ? Theme.fg : Theme.red
+                  tip: card.rm ? "Don't uninstall" : "Queue for uninstall"
+                  onClicked: root.toggleThemeRemove(card.t)
+                }
+              }
+              Flow {
+                width: parent.width
+                spacing: Theme.px(5)
+                Chip {
+                  text: !card.t.user ? "Omarchy" : card.t.source === "symlink" ? "dev link" : card.t.source === "local" ? "local folder" : "git"
+                  tone: Theme.blue
+                }
+                Chip { visible: card.t.user && card.t.builtin; text: "replaces Omarchy's"; tone: Theme.accent }
+                Chip { visible: card.t.risk !== ""; text: "⚠ " + card.t.risk; tone: Theme.yellow }
+                Txt { visible: card.label !== ""; text: "→ " + card.label; color: card.rm ? Theme.red : Theme.accent; font.pixelSize: Theme.fsSmall }
+              }
+            }
+          }
+        }
+        Txt {
+          anchors.centerIn: parent
+          visible: grid.count === 0 && !root.loading
+          text: root.filter === "pending" ? "Nothing queued." : "No themes match."
+          color: Theme.faint
+        }
+      }
+
       // ---------------------------------------------------------------- footer
       Rectangle {
         id: footer
@@ -534,7 +788,9 @@ ShellRoot {
           anchors { left: parent.left; leftMargin: Theme.px(14); verticalCenter: parent.verticalCenter; right: footerBtns.left; rightMargin: Theme.px(12) }
           text: root.pendingCount
                 ? root.pendingCount + " change" + (root.pendingCount === 1 ? "" : "s") + " queued — nothing happens until you apply"
-                : "Pick changes below; they're queued, then applied together (the bar reloads once per change while it runs)."
+                : root.tab === "themes"
+                  ? "Pick a theme to use and any to uninstall; nothing changes until you apply. Uninstalled themes are backed up first."
+                  : "Pick changes below; they're queued, then applied together (the bar reloads once per change while it runs)."
           color: root.pendingCount ? Theme.fg : Theme.faint
         }
         Row {
@@ -579,7 +835,7 @@ ShellRoot {
             Txt { text: "Apply " + root.ops().length + " changes?"; font.pixelSize: Theme.fsLarge; font.bold: true }
             Txt {
               visible: root.checking
-              text: "Checking the plugins to uninstall for local work…"
+              text: "Checking what's being uninstalled for local work…"
               color: Theme.faint
             }
             Repeater {
@@ -645,7 +901,7 @@ ShellRoot {
             width: parent.width
             spacing: Theme.px(8)
             Txt {
-              text: root.busy ? "Applying… the bar will reload a few times" : (root.progressSummary || "Finished")
+              text: root.busy ? "Applying…" : (root.progressSummary || "Finished")
               font.pixelSize: Theme.fsLarge; font.bold: true
             }
             Repeater {
@@ -660,7 +916,7 @@ ShellRoot {
                        : modelData.status === "running" ? Theme.accent : Theme.faint
                 }
                 Txt {
-                  visible: modelData.msg !== "" && modelData.status !== "ok"
+                  visible: modelData.msg !== "" && (modelData.status !== "ok" || modelData.op === "theme-remove")
                   width: parent.width
                   text: "    " + modelData.msg
                   color: Theme.faint; font.pixelSize: Theme.fsSmall; wrapMode: Text.Wrap; elide: Text.ElideNone
