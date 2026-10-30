@@ -4,7 +4,8 @@
     apply.py '[{"id": "...", "op": "put", "section": "right"}, ...]'
 
 ops: enable, disable, put (onto a bar section), move (to a bar section),
-remove (uninstall); theme-set and theme-remove (with "name"). Each plugin
+remove (uninstall); theme-set (with "name", optionally "wallpaper"),
+theme-wallpaper (with "name" and "wallpaper") and theme-remove (with "name"). Each plugin
 change makes the shell rebuild the bar, so before
 every step this waits for the shell to answer again. Prints one JSON line
 per event for the UI and appends the same to ~/.local/state/plugboard/apply.log.
@@ -23,8 +24,11 @@ LOG = os.path.expanduser("~/.local/state/plugboard/apply.log")
 THEMES_DIR = os.path.expanduser("~/.config/omarchy/themes")
 THEME_BACKUPS = os.path.expanduser("~/.local/share/plugboard/theme-backups")
 CURRENT_THEME = os.path.expanduser("~/.local/state/omarchy/current/theme.name")
+STAGED_THEME = os.path.expanduser("~/.local/state/omarchy/current/theme")
+CURRENT_BG = os.path.expanduser("~/.local/state/omarchy/current/background")
+USER_BGS = os.path.expanduser("~/.config/omarchy/backgrounds")
 # Switch before removing, so a batch can move off a theme and then delete it.
-ORDER = {"disable": 0, "move": 1, "put": 2, "enable": 2, "remove": 3, "theme-set": 4, "theme-remove": 5}
+ORDER = {"disable": 0, "move": 1, "put": 2, "enable": 2, "remove": 3, "theme-set": 4, "theme-wallpaper": 4, "theme-remove": 5}
 BUSY = ("not responding", "not running", "not ready")
 
 os.makedirs(os.path.dirname(LOG), exist_ok=True)
@@ -166,16 +170,39 @@ def current_theme():
         return ""
 
 
+def set_wallpaper(name, wallpaper):
+    """Point the background at one of the theme's wallpapers, as `omarchy theme
+    bg set` would. `wallpaper` is {"name": file, "mine": bool}: the theme's own
+    ones are used from the staged copy of the current theme (where Omarchy's
+    own next-background cycling looks), yours from ~/.config/omarchy/backgrounds."""
+    fname = str(wallpaper.get("name") or "")
+    if not fname or "/" in fname or fname.startswith("."):
+        return 1, "bad wallpaper name"
+    base = os.path.join(USER_BGS, name) if wallpaper.get("mine") else os.path.join(STAGED_THEME, "backgrounds")
+    path = os.path.join(base, fname)
+    if not os.path.isfile(path):
+        return 1, "wallpaper not found: " + fname
+    rc, out = run(["omarchy", "theme", "bg", "set", path])
+    try:
+        got = os.path.basename(os.readlink(CURRENT_BG))
+    except OSError:
+        got = ""
+    if got != fname:
+        return 1, "the wallpaper is still " + (got or "unknown") + (f" ({out})" if out else "")
+    return 0, ""
+
+
 def theme_step(op):
     name = op.get("name", "")
     # The same rule `omarchy theme install` holds names to.
     if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9._+-]*$", name):
         return 1, "bad theme name"
-    if op["op"] == "theme-set":
-        rc, out = run(["omarchy", "theme", "set", name])
+    if op["op"] in ("theme-set", "theme-wallpaper"):
+        if op["op"] == "theme-set":
+            rc, out = run(["omarchy", "theme", "set", name])
         if current_theme() != name:
             return 1, "the theme is still " + (current_theme() or "unknown") + (f" ({out})" if out else "")
-        return 0, ""
+        return set_wallpaper(name, op["wallpaper"]) if op.get("wallpaper") else (0, "")
     path = os.path.join(THEMES_DIR, name)
     if current_theme() == name:
         return 1, "it's the theme in use; switch to another one first"
@@ -197,7 +224,7 @@ def theme_step(op):
 
 
 def step(op):
-    if op["op"] in ("theme-set", "theme-remove"):
+    if op["op"] in ("theme-set", "theme-wallpaper", "theme-remove"):
         return theme_step(op)
     if op["op"] == "remove":
         rc, out = drop_from_hosts(op["id"])

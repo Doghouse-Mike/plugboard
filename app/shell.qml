@@ -39,6 +39,20 @@ ShellRoot {
       return JSON.stringify(root.ops())
     }
     function discard(): void { root.discard() }
+    function wallpaper(theme: string, file: string): string {
+      var t = root.themeByName(theme)
+      var w = t ? t.wallpapers.filter(function (x) { return x.name === file })[0] : null
+      if (!w) return "unknown"
+      root.chooseWallpaper(t, w)
+      return JSON.stringify(root.ops())
+    }
+    function pickWallpaper(theme: string): void { root.wallpaperTheme = root.themeByName(theme) }
+    function bundled(theme: string): string {
+      var t = root.themeByName(theme)
+      if (!t) return "unknown"
+      root.toggleBundled(t)
+      return JSON.stringify(root.ops())
+    }
     function apply(): void { root.startApply() }
     function confirm(): void { if (root.confirmOpen && !root.checking) root.run(root.ops()) }
     function snapshot(path: string): void { root.grabToImage(function (r) { r.saveToFile(path) }) }
@@ -71,6 +85,8 @@ ShellRoot {
 
       property var themes: []
       property string themeCurrent: ""
+      property string currentBackground: ""
+      property var wallpaperTheme: null   // the theme whose wallpaper picker is open
 
       property string tab: "plugins"
       function switchTab(name) {
@@ -80,7 +96,9 @@ ShellRoot {
       }
 
       // Plugins: id -> { target: "off"|"on"|"left"|"center"|"right", remove: bool }
-      // Themes: "theme-set" -> { target: name }; "theme:<name>" -> { remove: true }
+      // Themes: "theme-set" -> { target: name, wallpaper: {name, mine} | null };
+      // "theme:<name>" -> { remove: true }. A plugin queued with its theme
+      // carries bundledWith: <theme name>.
       property var pending: ({})
       property int rev: 0
       readonly property int pendingCount: { rev; return Object.keys(pending).length }
@@ -102,7 +120,8 @@ ShellRoot {
         if (e.key === Qt.Key_Q && (e.modifiers & Qt.ControlModifier)) Qt.quit()
         else if (e.key === Qt.Key_F && (e.modifiers & Qt.ControlModifier)) searchInput.forceActiveFocus()
         else if (e.key === Qt.Key_Escape) {
-          if (root.confirmOpen) root.confirmOpen = false
+          if (root.wallpaperTheme) root.wallpaperTheme = null
+          else if (root.confirmOpen) root.confirmOpen = false
           else if (root.progressOpen && !root.busy) root.progressOpen = false
         }
       }
@@ -166,10 +185,53 @@ ShellRoot {
         if (locked) return
         var next = Object.assign({}, pending)
         if (t.name === themeCurrent) delete next["theme-set"]
-        else next["theme-set"] = { target: t.name }
+        else next["theme-set"] = { target: t.name, wallpaper: null }
         delete next["theme:" + t.name]
-        // The theme in use can only be removed while a switch away from it is queued.
-        if (!next["theme-set"]) delete next["theme:" + themeCurrent]
+        dropBundled(next, t.name)
+        keepCurrentUnlessSwitching(next)
+        pending = next
+        rev++
+      }
+      // The theme in use can only be removed while a switch away from it is queued.
+      function keepCurrentUnlessSwitching(next) {
+        var q = next["theme-set"]
+        if (!q || q.target === themeCurrent) { delete next["theme:" + themeCurrent]; dropBundled(next, themeCurrent) }
+      }
+      function dropBundled(next, name) {
+        for (var k in next) if (next[k].bundledWith === name) delete next[k]
+      }
+      // ---- wallpapers
+      function currentWallpaperName() { var b = currentBackground; return b.slice(b.lastIndexOf("/") + 1) }
+      function chosenWallpaper(t) {
+        rev
+        var q = pending["theme-set"]
+        if (q && q.target === t.name && q.wallpaper) return q.wallpaper.name
+        return t.name === themeCurrent ? currentWallpaperName() : ""
+      }
+      function chooseWallpaper(t, w) {
+        if (locked) return
+        var next = Object.assign({}, pending)
+        next["theme-set"] = { target: t.name, wallpaper: { name: w.name, mine: !!w.mine } }
+        // Picking the wallpaper already showing on the theme in use is no change.
+        if (t.name === themeCurrent && w.name === currentWallpaperName()) delete next["theme-set"]
+        delete next["theme:" + t.name]
+        dropBundled(next, t.name)
+        keepCurrentUnlessSwitching(next)
+        pending = next
+        rev++
+      }
+      // ---- plugins that came with a theme
+      function bundledInstalled(t) { return (t.plugins || []).filter(function (b) { var p = byId(b.id); return p && !p.firstParty }) }
+      function bundledQueued(t) {
+        rev
+        var list = bundledInstalled(t)
+        return list.length > 0 && list.every(function (b) { return pending[b.id] && pending[b.id].bundledWith === t.name })
+      }
+      function toggleBundled(t) {
+        if (locked) return
+        var next = Object.assign({}, pending)
+        if (bundledQueued(t)) dropBundled(next, t.name)
+        else bundledInstalled(t).forEach(function (b) { next[b.id] = { remove: true, bundledWith: t.name } })
         pending = next
         rev++
       }
@@ -177,14 +239,21 @@ ShellRoot {
         if (locked || !t.user) return
         var key = "theme:" + t.name
         if (!pending[key] && t.name === themeTarget()) return
-        store(key, pending[key] ? {} : { remove: true })
+        if (pending[key]) {
+          var next = Object.assign({}, pending)
+          delete next[key]
+          dropBundled(next, t.name)
+          pending = next
+          rev++
+        } else store(key, { remove: true })
       }
       function themePendingLabel(t) {
         rev
         if (pending["theme:" + t.name]) return "will be uninstalled"
         var q = pending["theme-set"]
+        if (q && q.target === t.name && t.name === themeCurrent) return "wallpaper will change"
         if (q && q.target === t.name) return "will be switched to"
-        if (q && t.name === themeCurrent) return "will be switched away from"
+        if (q && q.target !== themeCurrent && t.name === themeCurrent) return "will be switched away from"
         return ""
       }
       readonly property var visibleThemes: {
@@ -218,11 +287,15 @@ ShellRoot {
         var out = []
         for (var id in pending) {
           var q = pending[id]
-          if (id === "theme-set") { if (q.target !== themeCurrent) out.push({ id: id, op: "theme-set", name: q.target }); continue }
+          if (id === "theme-set") {
+            if (q.target !== themeCurrent) out.push({ id: id, op: "theme-set", name: q.target, wallpaper: q.wallpaper || null })
+            else if (q.wallpaper) out.push({ id: id, op: "theme-wallpaper", name: q.target, wallpaper: q.wallpaper })
+            continue
+          }
           if (id.indexOf("theme:") === 0) { out.push({ id: id, op: "theme-remove", name: id.slice(6) }); continue }
           var p = byId(id)
           if (!p) continue
-          if (q.remove) { out.push({ id: id, op: "remove" }); continue }
+          if (q.remove) { out.push({ id: id, op: "remove", bundledWith: q.bundledWith || "" }); continue }
           var cur = current(p), t = q.target
           if (!t || t === cur) continue
           if (t === "off") out.push({ id: id, op: "disable", barWidget: p.isBarWidget })
@@ -231,17 +304,22 @@ ShellRoot {
           else out.push({ id: id, op: "put", section: t })
         }
         // The order apply.py runs them in (tools/apply.py ORDER).
-        var order = { disable: 0, move: 1, put: 2, enable: 2, remove: 3, "theme-set": 4, "theme-remove": 5 }
+        var order = { disable: 0, move: 1, put: 2, enable: 2, remove: 3, "theme-set": 4, "theme-wallpaper": 4, "theme-remove": 5 }
         return out.sort(function (a, b) { return order[a.op] - order[b.op] })
       }
       function sectionName(s) { return { left: "left", center: "centre", right: "right" }[s] || s }
       function describe(o) {
-        if (o.op === "theme-set" || o.op === "theme-remove") {
+        if (o.op === "theme-set" || o.op === "theme-wallpaper" || o.op === "theme-remove") {
           var t = themeByName(o.name), tname = t ? t.title : o.name
-          return (o.op === "theme-set" ? "Switch to the " : "Uninstall the ") + tname + " theme"
+          var wp = o.wallpaper ? " (wallpaper " + o.wallpaper.name + ")" : ""
+          if (o.op === "theme-wallpaper") return "Change the " + tname + " theme's wallpaper to " + o.wallpaper.name
+          return (o.op === "theme-set" ? "Switch to the " + tname + " theme" + wp : "Uninstall the " + tname + " theme")
         }
         var p = byId(o.id), name = p ? p.name : o.id
-        if (o.op === "remove") return "Uninstall " + name
+        if (o.op === "remove") {
+          var with_ = o.bundledWith ? themeByName(o.bundledWith) : null
+          return "Uninstall " + name + (with_ ? " (came with " + with_.title + ")" : "")
+        }
         if (o.op === "disable") return "Turn off " + name
         if (o.op === "enable") return "Turn on " + name
         if (o.op === "move") return "Move " + name + " to " + sectionName(o.section)
@@ -251,7 +329,7 @@ ShellRoot {
         rev
         var q = pending[p.id]
         if (!q) return ""
-        if (q.remove) return "will be uninstalled"
+        if (q.remove) return q.bundledWith ? "will be uninstalled with the " + ((themeByName(q.bundledWith) || {}).title || q.bundledWith) + " theme" : "will be uninstalled"
         var t = q.target
         if (t === "off") return p.isBarWidget ? "will come off the bar" : "will turn off"
         if (t === "on") return "will turn on"
@@ -273,7 +351,7 @@ ShellRoot {
       }
       function run(list) {
         confirmOpen = false
-        progress = list.map(function (o) { return { id: o.id, op: o.op, name: o.name || "", section: o.section || "", status: "queued", msg: "" } })
+        progress = list.map(function (o) { return { id: o.id, op: o.op, name: o.name || "", wallpaper: o.wallpaper || null, bundledWith: o.bundledWith || "", section: o.section || "", status: "queued", msg: "" } })
         progressSummary = ""
         progressOpen = true
         applyProc.command = backend("apply.py", [JSON.stringify(list)])
@@ -363,6 +441,7 @@ ShellRoot {
               var data = JSON.parse(text)
               root.themes = data.themes || []
               root.themeCurrent = data.current || ""
+              root.currentBackground = data.currentBackground || ""
             } catch (e) {
               root.loadError = "Couldn't read themes: " + e
             }
@@ -370,11 +449,11 @@ ShellRoot {
             var next = {}
             for (var id in root.pending) {
               var q = root.pending[id]
-              if (id === "theme-set") { if (root.themeByName(q.target) && q.target !== root.themeCurrent) next[id] = q }
+              if (id === "theme-set") { if (root.themeByName(q.target) && (q.target !== root.themeCurrent || q.wallpaper)) next[id] = q }
               else if (id.indexOf("theme:") === 0) { var t = root.themeByName(id.slice(6)); if (t && t.user) next[id] = q }
               else next[id] = q
             }
-            if (!next["theme-set"]) delete next["theme:" + root.themeCurrent]
+            root.keepCurrentUnlessSwitching(next)
             root.pending = next
             root.rev++
           }
@@ -683,7 +762,7 @@ ShellRoot {
         ScrollBar.vertical: ScrollBar {}
         readonly property int cols: Math.max(1, Math.floor(width / Theme.px(250)))
         cellWidth: Math.floor(width / cols)
-        cellHeight: (cellWidth - Theme.px(28)) * 0.5625 + Theme.px(92)
+        cellHeight: (cellWidth - Theme.px(28)) * 0.5625 + Theme.px(150)
         delegate: Item {
           id: card
           required property var modelData
@@ -763,8 +842,38 @@ ShellRoot {
                   tone: Theme.blue
                 }
                 Chip { visible: card.t.user && card.t.builtin; text: "replaces Omarchy's"; tone: Theme.accent }
+                Chip { visible: card.t.wallpapers.length > 1; text: card.t.wallpapers.length + " wallpapers"; tone: Theme.muted }
+                Chip {
+                  readonly property int n: root.bundledInstalled(card.t).length
+                  visible: n > 0
+                  text: "came with " + n + " plugin" + (n === 1 ? "" : "s")
+                  tone: Theme.yellow
+                  MouseArea { id: bundleMa; anchors.fill: parent; hoverEnabled: true }
+                  Tip {
+                    show: bundleMa.containsMouse
+                    text: root.bundledInstalled(card.t).map(function (b) { return b.name }).join(", ")
+                          + (card.t.plugins.length ? "  (" + card.t.plugins[0].why + ")" : "")
+                  }
+                }
                 Chip { visible: card.t.risk !== ""; text: "⚠ " + card.t.risk; tone: Theme.yellow }
                 Txt { visible: card.label !== ""; text: "→ " + card.label; color: card.rm ? Theme.red : Theme.accent; font.pixelSize: Theme.fsSmall }
+              }
+              Row {
+                spacing: Theme.px(6)
+                Btn {
+                  visible: card.target && !card.rm && card.t.wallpapers.length > 1
+                  text: "Wallpaper…"
+                  tip: "Pick which of its wallpapers to show"
+                  onClicked: root.wallpaperTheme = card.t
+                }
+                Btn {
+                  readonly property int n: root.bundledInstalled(card.t).length
+                  visible: card.rm && n > 0
+                  text: root.bundledQueued(card.t) ? "Keep its " + n + " plugin" + (n === 1 ? "" : "s") : "Also uninstall its " + n + " plugin" + (n === 1 ? "" : "s")
+                  textColor: root.bundledQueued(card.t) ? Theme.fg : Theme.red
+                  tip: root.bundledInstalled(card.t).map(function (b) { return b.name }).join(", ")
+                  onClicked: root.toggleBundled(card.t)
+                }
               }
             }
           }
@@ -811,7 +920,7 @@ ShellRoot {
       // --------------------------------------------------------------- dialogs
       Rectangle {
         anchors.fill: parent
-        visible: root.confirmOpen || root.progressOpen
+        visible: root.confirmOpen || root.progressOpen || root.wallpaperTheme !== null
         color: Theme.a(Theme.bg, 0.75)
         MouseArea { anchors.fill: parent }
       }
@@ -846,7 +955,7 @@ ShellRoot {
                 readonly property var p: root.byId(modelData.id)
                 width: confirmCol.width
                 spacing: Theme.px(2)
-                Txt { text: "• " + root.describe(modelData); color: modelData.op === "remove" ? Theme.red : Theme.fg; width: parent.width }
+                Txt { text: "• " + root.describe(modelData); color: modelData.op === "remove" || modelData.op === "theme-remove" ? Theme.red : Theme.fg; width: parent.width }
                 Txt {
                   visible: !!(parent.info && parent.info.warning)
                   text: "   ⚠ " + (parent.info ? parent.info.warning : "")
@@ -868,6 +977,27 @@ ShellRoot {
                   text: "   taken out of the tray drawer first"
                   color: Theme.faint; font.pixelSize: Theme.fsSmall
                 }
+                Txt {
+                  // `omarchy plugin remove` restores the original only for an enabled clone.
+                  readonly property var orig: modelData.op === "remove" && parent.p && parent.p.clonedFrom && parent.p.enabled ? root.byId(parent.p.clonedFrom) : null
+                  visible: !!orig
+                  text: "   Omarchy's own " + (orig ? orig.name : "") + " comes back in its place"
+                  color: Theme.faint; font.pixelSize: Theme.fsSmall; wrapMode: Text.Wrap; width: parent.width
+                }
+                Txt {
+                  readonly property var th: modelData.op === "theme-remove" ? root.themeByName(modelData.name) : null
+                  readonly property var kept: th ? root.bundledInstalled(th).filter(function (b) { return !(root.pending[b.id] && root.pending[b.id].remove) }) : []
+                  visible: kept.length > 0
+                  text: "   ⚠ " + kept.length + " plugin" + (kept.length === 1 ? "" : "s") + " that came with it stay" + (kept.length === 1 ? "s" : "") + " installed: "
+                        + kept.slice(0, 4).map(function (b) { return b.name }).join(", ") + (kept.length > 4 ? "…" : "")
+                  color: Theme.yellow; wrapMode: Text.Wrap; width: parent.width
+                }
+                Txt {
+                  readonly property var th: modelData.op === "theme-remove" ? root.themeByName(modelData.name) : null
+                  visible: !!(th && th.myWallpapers)
+                  text: "   your own wallpapers for it in " + (th ? th.myWallpapers.replace(/^\/home\/[^/]+/, "~") : "") + " are kept"
+                  color: Theme.faint; font.pixelSize: Theme.fsSmall; wrapMode: Text.Wrap; width: parent.width
+                }
               }
             }
             Row {
@@ -879,6 +1009,73 @@ ShellRoot {
                 active: !root.checking
                 opacity: root.checking ? 0.4 : 1
                 onClicked: if (!root.checking) root.run(root.ops())
+              }
+            }
+          }
+        }
+      }
+
+      Rectangle {
+        id: picker
+        visible: root.wallpaperTheme !== null
+        anchors.centerIn: parent
+        width: Math.min(parent.width - Theme.px(60), Theme.px(900))
+        height: Math.min(parent.height - Theme.px(60), pickerHint.y + pickerHint.height + wpGrid.contentHeight + Theme.px(40))
+        color: Theme.bg
+        border.color: Theme.border
+        readonly property var t: root.wallpaperTheme || ({ wallpapers: [], title: "" })
+        Txt {
+          id: pickerTitle
+          anchors { left: parent.left; top: parent.top; margins: Theme.px(16) }
+          text: "Wallpaper for " + picker.t.title
+          font.pixelSize: Theme.fsLarge; font.bold: true
+        }
+        Txt {
+          id: pickerHint
+          anchors { left: parent.left; top: pickerTitle.bottom; topMargin: Theme.px(4); leftMargin: Theme.px(16) }
+          text: root.chosenWallpaper(picker.t) ? "Applied with the rest of the queue."
+                : "Leave it unpicked and Omarchy shows the theme's first wallpaper."
+          color: Theme.faint; font.pixelSize: Theme.fsSmall
+        }
+        Btn {
+          anchors { right: parent.right; top: parent.top; margins: Theme.px(12) }
+          text: "Done"
+          onClicked: root.wallpaperTheme = null
+        }
+        GridView {
+          id: wpGrid
+          anchors { left: parent.left; right: parent.right; top: pickerHint.bottom; bottom: parent.bottom; margins: Theme.px(12) }
+          clip: true
+          model: picker.visible ? picker.t.wallpapers : []
+          readonly property int cols: Math.max(1, Math.floor(width / Theme.px(210)))
+          cellWidth: Math.floor(width / cols)
+          cellHeight: cellWidth * 0.5625 + Theme.px(30)
+          ScrollBar.vertical: ScrollBar {}
+          delegate: Item {
+            required property var modelData
+            readonly property bool chosen: root.chosenWallpaper(picker.t) === modelData.name
+            width: wpGrid.cellWidth; height: wpGrid.cellHeight
+            Rectangle {
+              anchors.fill: parent; anchors.margins: Theme.px(5)
+              color: Theme.normalFill
+              border.width: parent.chosen ? 2 : 1
+              border.color: parent.chosen ? Theme.accent : Theme.a(Theme.fg, 0.14)
+              Image {
+                anchors { left: parent.left; right: parent.right; top: parent.top; margins: Theme.px(4) }
+                height: width * 0.5625
+                source: "file://" + parent.parent.modelData.path
+                sourceSize.width: Theme.px(400)
+                fillMode: Image.PreserveAspectCrop
+                asynchronous: true; cache: false
+              }
+              Txt {
+                anchors { left: parent.left; right: parent.right; bottom: parent.bottom; margins: Theme.px(6) }
+                text: (parent.parent.chosen ? "✓ " : "") + parent.parent.modelData.name + (parent.parent.modelData.mine ? "  (yours)" : "")
+                color: parent.parent.chosen ? Theme.accent : Theme.faint; font.pixelSize: Theme.fsSmall
+              }
+              MouseArea {
+                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                onClicked: root.chooseWallpaper(picker.t, parent.parent.modelData)
               }
             }
           }

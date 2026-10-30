@@ -58,6 +58,19 @@ the same Apply as plugins, switch first.
 - **The theme in use can't be uninstalled** unless the same batch switches
   away from it first. A theme you installed under a built-in's name is marked
   *replaces Omarchy's*; uninstalling it brings the built-in back.
+- **Pick the wallpaper.** A theme with several wallpapers gets a
+  **Wallpaper…** button once it's the one you're switching to (or using):
+  choose from its own wallpapers and any you added under
+  `~/.config/omarchy/backgrounds/<theme>/`. Left unpicked, Omarchy shows the
+  first. Your own wallpapers folder is kept when the theme is uninstalled.
+- **Plugins that came with a theme.** A theme can't install plugins itself,
+  but bundles that ship a theme and plugins together leave them behind when
+  the theme goes. Plugboard flags installed plugins that look like part of a
+  theme: ones symlinked into its folder, ones whose source it ships, or ones
+  named after it (`lcars.*` for `lcars`). Queuing the theme for uninstall
+  offers **Also uninstall its plugins**; leave them and the confirmation says
+  which stay. Uninstalling a clone that's in use brings Omarchy's original
+  widget back.
 
 ## Careful around
 
